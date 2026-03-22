@@ -1,114 +1,84 @@
 import git
+import datetime
+from collections import defaultdict
 from typing import Dict, List, Tuple
-import re
-from dataclasses import dataclass
-from enum import Enum
-
-class RiskLevel(Enum):
-    LOW = 1
-    MEDIUM = 2
-    HIGH = 3
-    CRITICAL = 4
-
-@dataclass
-class CommitAnalysis:
-    commit_hash: str
-    risk_level: RiskLevel
-    impact_score: float
-    affected_files: List[str]
-    risky_patterns: List[str]
 
 class GitAnalyzer:
     def __init__(self, repo_path: str):
         self.repo = git.Repo(repo_path)
-        self.risk_patterns = {
-            'critical': [
-                r'DROP\s+TABLE',
-                r'DROP\s+DATABASE',
-                r'rm\s+-rf',
-                r'TRUNCATE\s+TABLE'
-            ],
-            'high': [
-                r'password',
-                r'SECRET',
-                r'API_KEY',
-                r'\bTODO\b'
-            ],
-            'medium': [
-                r'deprecated',
-                r'FIXME',
-                r'hack',
-                r'workaround'
-            ]
-        }
-
-    def analyze_commit(self, commit_hash: str) -> CommitAnalysis:
-        commit = self.repo.commit(commit_hash)
-        affected_files = []
-        risky_patterns = []
-        impact_score = 0.0
-
-        # Analyze each file in the commit
-        for file in commit.stats.files:
-            affected_files.append(file)
-            try:
-                diff = commit.diff(commit.parents[0], paths=file, create_patch=True)
-                for d in diff:
-                    if d.diff:
-                        decoded_diff = d.diff.decode('utf-8')
-                        impact_score += self._calculate_diff_impact(decoded_diff)
-                        patterns = self._find_risky_patterns(decoded_diff)
-                        risky_patterns.extend(patterns)
-            except:
-                continue
-
-        risk_level = self._determine_risk_level(impact_score, len(risky_patterns))
-
-        return CommitAnalysis(
-            commit_hash=commit_hash,
-            risk_level=risk_level,
-            impact_score=impact_score,
-            affected_files=affected_files,
-            risky_patterns=risky_patterns
-        )
-
-    def _calculate_diff_impact(self, diff_content: str) -> float:
-        lines_added = len([l for l in diff_content.split('\n') if l.startswith('+')])
-        lines_removed = len([l for l in diff_content.split('\n') if l.startswith('-')])
+        self.activity_data = defaultdict(int)
         
-        # Impact formula considers both additions and deletions
-        # Deletions are weighted slightly higher as they're generally riskier
-        return (lines_added * 1.0) + (lines_removed * 1.2)
-
-    def _find_risky_patterns(self, content: str) -> List[str]:
-        found_patterns = []
+    def analyze_contributions(self) -> Dict[str, dict]:
+        """Analyze repository contributions by author"""
+        contributions = defaultdict(lambda: {
+            'commits': 0,
+            'insertions': 0,
+            'deletions': 0,
+            'files_modified': set()
+        })
         
-        for severity, patterns in self.risk_patterns.items():
-            for pattern in patterns:
-                if re.search(pattern, content, re.IGNORECASE):
-                    found_patterns.append(f'{severity}:{pattern}')
-        
-        return found_patterns
-
-    def _determine_risk_level(self, impact_score: float, risky_pattern_count: int) -> RiskLevel:
-        if impact_score > 500 or risky_pattern_count >= 3:
-            return RiskLevel.CRITICAL
-        elif impact_score > 200 or risky_pattern_count >= 2:
-            return RiskLevel.HIGH
-        elif impact_score > 50 or risky_pattern_count >= 1:
-            return RiskLevel.MEDIUM
-        return RiskLevel.LOW
-
-    def analyze_branch(self, branch_name: str, max_commits: int = 10) -> List[CommitAnalysis]:
-        analyses = []
-        commits = list(self.repo.iter_commits(branch_name, max_count=max_commits))
-        
-        for commit in commits:
-            analysis = self.analyze_commit(commit.hexsha)
-            analyses.append(analysis)
+        for commit in self.repo.iter_commits():
+            author_email = commit.author.email
+            contributions[author_email]['commits'] += 1
             
-        return analyses
+            # Track file changes and line modifications
+            if len(commit.parents) > 0:
+                diffs = commit.parents[0].diff(commit)
+                for diff in diffs:
+                    contributions[author_email]['files_modified'].add(diff.a_path)
+                    if diff.a_blob and diff.b_blob:
+                        contributions[author_email]['insertions'] += diff.stats.get('insertions', 0)
+                        contributions[author_email]['deletions'] += diff.stats.get('deletions', 0)
+        
+        # Convert sets to lengths for JSON serialization
+        for author in contributions:
+            contributions[author]['files_modified'] = len(contributions[author]['files_modified'])
+            
+        return dict(contributions)
 
-    def get_high_risk_commits(self, branch_name: str, max_commits: int = 50) -> List[CommitAnalysis]:
-        analyses = self.analyze_branch(branch_name, max_commits)
-        return [a for a in analyses if a.risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)]
+    def generate_activity_heatmap(self) -> Dict[str, int]:
+        """Generate activity heatmap data for the repository"""
+        for commit in self.repo.iter_commits():
+            date_str = commit.committed_datetime.strftime('%Y-%m-%d')
+            self.activity_data[date_str] += 1
+        return dict(self.activity_data)
+    
+    def get_hotspots(self) -> List[Tuple[str, int]]:
+        """Identify code hotspots - files with most frequent changes"""
+        file_changes = defaultdict(int)
+        
+        for commit in self.repo.iter_commits():
+            if len(commit.parents) > 0:
+                diffs = commit.parents[0].diff(commit)
+                for diff in diffs:
+                    if diff.a_path:
+                        file_changes[diff.a_path] += 1
+        
+        # Sort by number of changes in descending order
+        hotspots = sorted(file_changes.items(), key=lambda x: x[1], reverse=True)
+        return hotspots
+    
+    def get_commit_velocity(self, days: int = 30) -> Dict[str, int]:
+        """Calculate commit velocity over specified time period"""
+        cutoff_date = datetime.datetime.now() - datetime.timedelta(days=days)
+        velocity_data = defaultdict(int)
+        
+        for commit in self.repo.iter_commits():
+            if commit.committed_datetime > cutoff_date:
+                date_str = commit.committed_datetime.strftime('%Y-%m-%d')
+                velocity_data[date_str] += 1
+                
+        return dict(velocity_data)
+
+    def get_summary_stats(self) -> Dict[str, int]:
+        """Get summary statistics for the repository"""
+        return {
+            'total_commits': len(list(self.repo.iter_commits())),
+            'total_contributors': len(self.get_unique_contributors()),
+            'active_branches': len(list(self.repo.branches)),
+            'total_tags': len(list(self.repo.tags))
+        }
+    
+    def get_unique_contributors(self) -> set:
+        """Get set of unique contributor emails"""
+        return {commit.author.email for commit in self.repo.iter_commits()}
