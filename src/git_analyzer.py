@@ -1,117 +1,114 @@
-import subprocess
-from typing import Dict, List, Optional
+import git
+from typing import Dict, List, Tuple
 import re
 from dataclasses import dataclass
+from enum import Enum
+
+class RiskLevel(Enum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+    CRITICAL = 4
 
 @dataclass
-class DiffMetrics:
-    file_path: str
-    lines_added: int
-    lines_removed: int 
-    complexity_score: float
-    risk_score: float
+class CommitAnalysis:
+    commit_hash: str
+    risk_level: RiskLevel
+    impact_score: float
+    affected_files: List[str]
+    risky_patterns: List[str]
 
-class GitDiffAnalyzer:
-    def __init__(self, repo_path: str = '.'):
-        self.repo_path = repo_path
-
-    def get_diff(self, commit_range: Optional[str] = None) -> str:
-        """Get git diff output for specified commit range"""
-        cmd = ['git', 'diff']
-        if commit_range:
-            cmd.append(commit_range)
-        
-        result = subprocess.run(
-            cmd,
-            cwd=self.repo_path,
-            capture_output=True,
-            text=True
-        )
-        return result.stdout
-
-    def parse_diff(self, diff_text: str) -> List[DiffMetrics]:
-        """Parse git diff output into structured metrics"""
-        metrics: List[DiffMetrics] = []
-        current_file = ''
-        lines_added = 0
-        lines_removed = 0
-
-        for line in diff_text.split('\n'):
-            if line.startswith('+++'):
-                current_file = line[6:]
-            elif line.startswith('+') and not line.startswith('+++'):
-                lines_added += 1
-            elif line.startswith('-') and not line.startswith('---'):
-                lines_removed += 1
-            elif line.startswith('diff --git') and current_file:
-                # Save previous file metrics
-                if current_file:
-                    metrics.append(self._create_metrics(current_file, lines_added, lines_removed))
-                current_file = ''
-                lines_added = 0
-                lines_removed = 0
-
-        # Add final file metrics
-        if current_file:
-            metrics.append(self._create_metrics(current_file, lines_added, lines_removed))
-
-        return metrics
-
-    def _create_metrics(self, file_path: str, lines_added: int, lines_removed: int) -> DiffMetrics:
-        """Create DiffMetrics with computed scores"""
-        complexity_score = self._calculate_complexity(lines_added, lines_removed)
-        risk_score = self._calculate_risk_score(file_path, lines_added, lines_removed)
-        
-        return DiffMetrics(
-            file_path=file_path,
-            lines_added=lines_added,
-            lines_removed=lines_removed,
-            complexity_score=complexity_score,
-            risk_score=risk_score
-        )
-
-    def _calculate_complexity(self, lines_added: int, lines_removed: int) -> float:
-        """Calculate complexity score based on changes"""
-        base_score = (lines_added + lines_removed) / 10.0
-        change_ratio = lines_added / (lines_removed + 1)  # Avoid div by zero
-        return min(base_score * change_ratio, 10.0)
-
-    def _calculate_risk_score(self, file_path: str, lines_added: int, lines_removed: int) -> float:
-        """Calculate risk score based on file type and changes"""
-        risk_factors = {
-            r'\.py$': 1.0,  # Python files
-            r'\.js$': 1.2,  # JavaScript files
-            r'test': 0.5,  # Test files
-            r'security': 2.0,  # Security-related files
-            r'core': 1.5   # Core functionality
+class GitAnalyzer:
+    def __init__(self, repo_path: str):
+        self.repo = git.Repo(repo_path)
+        self.risk_patterns = {
+            'critical': [
+                r'DROP\s+TABLE',
+                r'DROP\s+DATABASE',
+                r'rm\s+-rf',
+                r'TRUNCATE\s+TABLE'
+            ],
+            'high': [
+                r'password',
+                r'SECRET',
+                r'API_KEY',
+                r'\bTODO\b'
+            ],
+            'medium': [
+                r'deprecated',
+                r'FIXME',
+                r'hack',
+                r'workaround'
+            ]
         }
 
-        base_risk = 1.0
-        for pattern, factor in risk_factors.items():
-            if re.search(pattern, file_path, re.IGNORECASE):
-                base_risk *= factor
+    def analyze_commit(self, commit_hash: str) -> CommitAnalysis:
+        commit = self.repo.commit(commit_hash)
+        affected_files = []
+        risky_patterns = []
+        impact_score = 0.0
 
-        change_volume = lines_added + lines_removed
-        return min(base_risk * (change_volume / 20.0), 10.0)
+        # Analyze each file in the commit
+        for file in commit.stats.files:
+            affected_files.append(file)
+            try:
+                diff = commit.diff(commit.parents[0], paths=file, create_patch=True)
+                for d in diff:
+                    if d.diff:
+                        decoded_diff = d.diff.decode('utf-8')
+                        impact_score += self._calculate_diff_impact(decoded_diff)
+                        patterns = self._find_risky_patterns(decoded_diff)
+                        risky_patterns.extend(patterns)
+            except:
+                continue
 
-    def analyze_commit_range(self, commit_range: str) -> Dict[str, List[DiffMetrics]]:
-        """Analyze git diff for a commit range and return metrics"""
-        diff_text = self.get_diff(commit_range)
-        metrics = self.parse_diff(diff_text)
+        risk_level = self._determine_risk_level(impact_score, len(risky_patterns))
 
-        # Group metrics by risk level
-        risk_groups: Dict[str, List[DiffMetrics]] = {
-            'high_risk': [],
-            'medium_risk': [],
-            'low_risk': []
-        }
+        return CommitAnalysis(
+            commit_hash=commit_hash,
+            risk_level=risk_level,
+            impact_score=impact_score,
+            affected_files=affected_files,
+            risky_patterns=risky_patterns
+        )
 
-        for metric in metrics:
-            if metric.risk_score >= 7.0:
-                risk_groups['high_risk'].append(metric)
-            elif metric.risk_score >= 4.0:
-                risk_groups['medium_risk'].append(metric)
-            else:
-                risk_groups['low_risk'].append(metric)
+    def _calculate_diff_impact(self, diff_content: str) -> float:
+        lines_added = len([l for l in diff_content.split('\n') if l.startswith('+')])
+        lines_removed = len([l for l in diff_content.split('\n') if l.startswith('-')])
+        
+        # Impact formula considers both additions and deletions
+        # Deletions are weighted slightly higher as they're generally riskier
+        return (lines_added * 1.0) + (lines_removed * 1.2)
 
-        return risk_groups
+    def _find_risky_patterns(self, content: str) -> List[str]:
+        found_patterns = []
+        
+        for severity, patterns in self.risk_patterns.items():
+            for pattern in patterns:
+                if re.search(pattern, content, re.IGNORECASE):
+                    found_patterns.append(f'{severity}:{pattern}')
+        
+        return found_patterns
+
+    def _determine_risk_level(self, impact_score: float, risky_pattern_count: int) -> RiskLevel:
+        if impact_score > 500 or risky_pattern_count >= 3:
+            return RiskLevel.CRITICAL
+        elif impact_score > 200 or risky_pattern_count >= 2:
+            return RiskLevel.HIGH
+        elif impact_score > 50 or risky_pattern_count >= 1:
+            return RiskLevel.MEDIUM
+        return RiskLevel.LOW
+
+    def analyze_branch(self, branch_name: str, max_commits: int = 10) -> List[CommitAnalysis]:
+        analyses = []
+        commits = list(self.repo.iter_commits(branch_name, max_count=max_commits))
+        
+        for commit in commits:
+            analysis = self.analyze_commit(commit.hexsha)
+            analyses.append(analysis)
+            
+        return analyses
+
+    def get_high_risk_commits(self, branch_name: str, max_commits: int = 50) -> List[CommitAnalysis]:
+        analyses = self.analyze_branch(branch_name, max_commits)
+        return [a for a in analyses if a.risk_level in (RiskLevel.HIGH, RiskLevel.CRITICAL)]
