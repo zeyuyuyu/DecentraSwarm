@@ -1,30 +1,28 @@
-import git
-import matplotlib.pyplot as plt
-import networkx as nx
+import os
+import subprocess
 
-def analyze_commit_history(repo_path):
-    # Create a Git repository object
-    repo = git.Repo(repo_path)
+class GitAnalyzer:
+    def __init__(self, repo_path):
+        self.repo_path = repo_path
 
-    # Get the commit history
-    commits = list(repo.iter_commits())
+    def get_branch_info(self):
+        os.chdir(self.repo_path)
+        branches = subprocess.check_output(['git', 'branch']).decode('utf-8').splitlines()
+        branch_info = []
+        for branch in branches:
+            if branch.startswith('*'):
+                current_branch = branch.strip('* ')
+            else:
+                branch_info.append(branch.strip('* '))
+        return current_branch, branch_info
 
-    # Create a directed graph
-    G = nx.DiGraph()
+    def get_commit_history(self):
+        os.chdir(self.repo_path)
+        commit_history = subprocess.check_output(['git', 'log', '--pretty=format:%h %an %ad %s']).decode('utf-8').splitlines()
+        return commit_history
 
-    # Add nodes (commits) to the graph
-    for commit in commits:
-        G.add_node(commit.hexsha, author=commit.author.name, date=commit.authored_date)
-
-    # Add edges (commit relationships) to the graph
-    for i in range(1, len(commits)):
-        G.add_edge(commits[i].hexsha, commits[i-1].hexsha)
-
-    # Visualize the commit history
-    pos = nx.spring_layout(G)
-    plt.figure(figsize=(12, 8))
-    nx.draw(G, pos, with_labels=True, node_color='lightblue', edge_color='gray', font_size=8)
-    plt.title('Commit History Visualization')
-    plt.show()
-
-    return G
+    def get_file_changes(self, branch='master'):
+        os.chdir(self.repo_path)
+        subprocess.check_output(['git', 'checkout', branch])
+        file_changes = subprocess.check_output(['git', 'diff', '--name-only']).decode('utf-8').splitlines()
+        return file_changes
