@@ -1,28 +1,42 @@
 import os
-import subprocess
+import git
+import datetime
 
 class GitAnalyzer:
     def __init__(self, repo_path):
-        self.repo_path = repo_path
-
-    def get_branch_info(self):
-        os.chdir(self.repo_path)
-        branches = subprocess.check_output(['git', 'branch']).decode('utf-8').splitlines()
-        branch_info = []
-        for branch in branches:
-            if branch.startswith('*'):
-                current_branch = branch.strip('* ')
-            else:
-                branch_info.append(branch.strip('* '))
-        return current_branch, branch_info
+        self.repo = git.Repo(repo_path)
 
     def get_commit_history(self):
-        os.chdir(self.repo_path)
-        commit_history = subprocess.check_output(['git', 'log', '--pretty=format:%h %an %ad %s']).decode('utf-8').splitlines()
+        commit_history = []
+        for commit in self.repo.iter_commits():
+            commit_history.append({
+                'hash': commit.hexsha,
+                'author': commit.author.name,
+                'email': commit.author.email,
+                'date': commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+                'message': commit.message
+            })
         return commit_history
 
-    def get_file_changes(self, branch='master'):
-        os.chdir(self.repo_path)
-        subprocess.check_output(['git', 'checkout', branch])
-        file_changes = subprocess.check_output(['git', 'diff', '--name-only']).decode('utf-8').splitlines()
-        return file_changes
+    def get_file_changes(self, file_path):
+        changes = []
+        for commit in self.repo.iter_commits(paths=file_path):
+            for file_change in commit.diff(commit.parents[0] if commit.parents else None):
+                if file_change.a_path == file_path:
+                    changes.append({
+                        'commit_hash': commit.hexsha,
+                        'author': commit.author.name,
+                        'email': commit.author.email,
+                        'date': commit.committed_datetime.strftime('%Y-%m-%d %H:%M:%S'),
+                        'lines_added': file_change.additions,
+                        'lines_deleted': file_change.deletions
+                    })
+        return changes
+
+    def get_repository_stats(self):
+        commit_count = len(list(self.repo.iter_commits()))
+        branch_count = len(self.repo.branches)
+        return {
+            'commit_count': commit_count,
+            'branch_count': branch_count
+        }
